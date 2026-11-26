@@ -575,6 +575,7 @@
       dateInput.value = getLocalTodayISO();
       updateDatePreview();
       dateInput.addEventListener("change", updateDatePreview);
+      dateInput.addEventListener("input", updateDatePreview);
 
       // Wheel state
       const now = new Date();
@@ -588,6 +589,7 @@
       function updateTimeSummary() {
         timeSummary.textContent = pad2(selectedHour) + ":" + pad2(selectedMinute);
       }
+      updateTimeSummary();
 
       function buildWheel(container, maxValue, onSelect) {
         container.innerHTML = "";
@@ -625,27 +627,37 @@
           });
         }
 
+        function syncFromScroll() {
+          const rawIndex = Math.round(container.scrollTop / ITEM_HEIGHT);
+          const clamped = Math.max(0, Math.min(maxValue, rawIndex));
+          highlightIndex(clamped);
+          onSelect(clamped);
+          updateTimeSummary();
+          return clamped;
+        }
+
         let rafPending = false;
         container.addEventListener("scroll", function () {
           if (rafPending) return;
           rafPending = true;
           requestAnimationFrame(function () {
             rafPending = false;
-            const rawIndex = Math.round(container.scrollTop / ITEM_HEIGHT);
-            const clamped = Math.max(0, Math.min(maxValue, rawIndex));
-            highlightIndex(clamped);
-            onSelect(clamped);
-            updateTimeSummary();
+            syncFromScroll();
           });
         });
 
         return {
+          syncFromScroll: syncFromScroll,
           setValueInstant: function (val) {
             const clamped = Math.max(0, Math.min(maxValue, val));
+            container.style.scrollSnapType = "none";
             container.scrollTop = clamped * ITEM_HEIGHT;
             highlightIndex(clamped);
             onSelect(clamped);
             updateTimeSummary();
+            requestAnimationFrame(function () {
+              container.style.scrollSnapType = "";
+            });
           },
         };
       }
@@ -699,6 +711,10 @@
         }
       });
 
+      function normalizeText(value) {
+        return value.replace(/[\u200B-\u200D\uFEFF]/g, "").trim();
+      }
+
       nextBtn.addEventListener("click", function () {
         if (currentStep === 1) {
           if (!dateInput.value) {
@@ -711,21 +727,51 @@
           return;
         }
         if (currentStep === 2) {
+          hoursController.syncFromScroll();
+          minutesController.syncFromScroll();
           goToStep(3);
         }
       });
 
       descriptionInput.addEventListener("input", function () {
-        if (descriptionInput.value.trim().length > 0) {
+        if (normalizeText(descriptionInput.value).length > 0) {
           descriptionInput.classList.remove("invalid");
           descriptionError.classList.remove("visible");
+        }
+      });
+
+      let pendingPayload = null;
+      let dataSent = false;
+
+      function flushPayload(shouldClose) {
+        if (!pendingPayload || dataSent) return;
+        dataSent = true;
+        if (tg && typeof tg.sendData === "function") {
+          try {
+            tg.sendData(JSON.stringify(pendingPayload));
+          } catch (e) {
+            // Ignore outside Telegram WebApp context
+          }
+        }
+        if (shouldClose && tg && typeof tg.close === "function") {
+          try {
+            tg.close();
+          } catch (e) {
+            // Ignore outside Telegram WebApp context
+          }
+        }
+      }
+
+      window.addEventListener("pagehide", function () {
+        if (isSubmitted && !dataSent) {
+          flushPayload(false);
         }
       });
 
       submitBtn.addEventListener("click", function () {
         if (isSubmitted) return;
 
-        const trimmedText = descriptionInput.value.trim();
+        const trimmedText = normalizeText(descriptionInput.value);
         if (!trimmedText) {
           descriptionInput.classList.add("invalid");
           descriptionError.classList.add("visible");
@@ -735,8 +781,9 @@
 
         isSubmitted = true;
         submitBtn.disabled = true;
+        descriptionInput.blur();
 
-        const payload = {
+        pendingPayload = {
           date: dateInput.value,
           time: pad2(selectedHour) + ":" + pad2(selectedMinute),
           description: trimmedText,
@@ -746,11 +793,8 @@
         goToStep(4);
 
         setTimeout(function () {
-          if (tg) {
-            tg.sendData(JSON.stringify(payload));
-            tg.close();
-          }
-        }, 1200);
+          flushPayload(true);
+        }, 1000);
       });
 
       goToStep(1);
